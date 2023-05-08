@@ -33,6 +33,10 @@ public:
     void start();
     void stop();
     void setWindow(ANativeWindow* window);
+    void read_fd(int sock, int *fd, void *data, size_t data_len);
+    int connect_socket(int sock, const char *path);
+   void  write_fd(int sock, int fd, void *data, size_t data_len);
+   int create_socket(const char *path);
     
     
 private:
@@ -58,7 +62,7 @@ private:
     // RenderLoop is called in a rendering thread started in start() method
     // It creates rendering context and renders scene until stop() is called
     void renderLoop();
-    
+
     bool initialize();
     void destroy();
 

@@ -1,11 +1,13 @@
-
 buildscript {
     repositories {
-        mavenCentral()
+        google()
+        jcenter()
     }
-
     dependencies {
-        classpath 'com.android.tools.build:gradle:0.14+'
+        classpath "com.android.tools.build:gradle:4.0.1"
+
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
     }
 }
 
@@ -13,17 +15,27 @@ apply plugin: 'com.android.application'
 
 android {
     compileSdkVersion 21
-    buildToolsVersion "21.1.1"
-
-    defaultConfig {
-        ndk {
-            moduleName "nativeegl"
-            ldLibs "log", "android", "EGL", "GLESv1_CM"
+    ndkVersion "21.4.7075529"
+    externalNativeBuild {
+        cmake {
+            path "src/main/jni/CMakeLists.txt"
+            version "3.10.2"
         }
+    }
+
+//    defaultConfig {
+//        ndk {
+//            moduleName "nativeegl"
+//            ldLibs "log", "android", "EGL", "GLESv1_CM"
+//        }
+//    }
+}
+
+
+allprojects {
+    repositories {
+        google() // `<-- here`
     }
 }
 
-task wrapper(type: Wrapper) {
-    gradleVersion = '2.1'
-}
 

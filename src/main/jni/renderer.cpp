@@ -20,6 +20,11 @@
 #include <android/native_window.h> // requires ndk r5 or newer
 #include <EGL/egl.h> // requires ndk r5 or newer
 #include <GLES/gl.h>
+#include <EGL/eglext.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 #include "logger.h"
 #include "renderer.h"
@@ -27,35 +32,36 @@
 #define LOG_TAG "EglSample"
 
 static GLint vertices[][3] = {
-    { -0x10000, -0x10000, -0x10000 },
-    {  0x10000, -0x10000, -0x10000 },
-    {  0x10000,  0x10000, -0x10000 },
-    { -0x10000,  0x10000, -0x10000 },
-    { -0x10000, -0x10000,  0x10000 },
-    {  0x10000, -0x10000,  0x10000 },
-    {  0x10000,  0x10000,  0x10000 },
-    { -0x10000,  0x10000,  0x10000 }
+            { -0x10000, -0x10000, -0x10000 },
+            {  0x10000, -0x10000, -0x10000 },
+            {  0x10000,  0x10000, -0x10000 },
+            { -0x10000,  0x10000, -0x10000 },
+            { -0x10000, -0x10000,  0x10000 },
+            {  0x10000, -0x10000,  0x10000 },
+            {  0x10000,  0x10000,  0x10000 },
+            { -0x10000,  0x10000,  0x10000 }
 };
 
 static GLint colors[][4] = {
-    { 0x00000, 0x00000, 0x00000, 0x10000 },
-    { 0x10000, 0x00000, 0x00000, 0x10000 },
-    { 0x10000, 0x10000, 0x00000, 0x10000 },
-    { 0x00000, 0x10000, 0x00000, 0x10000 },
-    { 0x00000, 0x00000, 0x10000, 0x10000 },
-    { 0x10000, 0x00000, 0x10000, 0x10000 },
-    { 0x10000, 0x10000, 0x10000, 0x10000 },
-    { 0x00000, 0x10000, 0x10000, 0x10000 }
+            { 0x00000, 0x00000, 0x00000, 0x10000 },
+            { 0x10000, 0x00000, 0x00000, 0x10000 },
+            { 0x10000, 0x10000, 0x00000, 0x10000 },
+            { 0x00000, 0x10000, 0x00000, 0x10000 },
+            { 0x00000, 0x00000, 0x10000, 0x10000 },
+            { 0x10000, 0x00000, 0x10000, 0x10000 },
+            { 0x10000, 0x10000, 0x10000, 0x10000 },
+            { 0x00000, 0x10000, 0x10000, 0x10000 }
 };
 
 GLubyte indices[] = {
-    0, 4, 5,    0, 5, 1,
-    1, 5, 6,    1, 6, 2,
-    2, 6, 7,    2, 7, 3,
-    3, 7, 4,    3, 4, 0,
-    4, 7, 6,    4, 6, 5,
-    3, 0, 1,    3, 1, 2
+            0, 4, 5,    0, 5, 1,
+            1, 5, 6,    1, 6, 2,
+            2, 6, 7,    2, 7, 3,
+            3, 7, 4,    3, 4, 0,
+            4, 7, 6,    4, 6, 5,
+            3, 0, 1,    3, 1, 2
 };
+
 
 
 Renderer::Renderer()
@@ -105,6 +111,84 @@ void Renderer::setWindow(ANativeWindow *window)
 
     return;
 }
+
+
+int Renderer::create_socket(const char *path)
+{
+    int sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    unlink(path);
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    {
+        exit(-1);
+    }
+
+    return sock;
+}
+
+int Renderer::connect_socket(int sock, const char *path)
+{
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strcpy(addr.sun_path, path);
+    return connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+}
+
+void Renderer::write_fd(int sock, int fd, void *data, size_t data_len)
+{
+    struct msghdr msg = {0};
+    char buf[CMSG_SPACE(sizeof(fd))];
+    memset(buf, '\0', sizeof(buf));
+
+    struct iovec io = {.iov_base = data, .iov_len = data_len};
+
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    msg.msg_control = buf;
+    msg.msg_controllen = sizeof(buf);
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(fd));
+
+    memmove(CMSG_DATA(cmsg), &fd, sizeof(fd));
+
+    msg.msg_controllen = CMSG_SPACE(sizeof(fd));
+
+    if (sendmsg(sock, &msg, 0) < 0)
+    {
+        exit(-1);
+    }
+}
+
+void Renderer::read_fd(int sock, int *fd, void *data, size_t data_len)
+{
+    struct msghdr msg = {0};
+
+    struct iovec io = {.iov_base = data, .iov_len = data_len};
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+
+    char c_buffer[256];
+    msg.msg_control = c_buffer;
+    msg.msg_controllen = sizeof(c_buffer);
+
+    if (recvmsg(sock, &msg, 0) < 0)
+    {
+        exit(-1);
+    }
+
+    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+
+    memmove(fd, CMSG_DATA(cmsg), sizeof(fd));
+}
+
 
 
 
@@ -236,6 +320,71 @@ bool Renderer::initialize()
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
     glFrustumf(-ratio, ratio, -1, 1, 1, 10);
+
+    const size_t TEXTURE_DATA_WIDTH = 256;
+    const size_t TEXTURE_DATA_HEIGHT = TEXTURE_DATA_WIDTH;
+    const size_t TEXTURE_DATA_SIZE = TEXTURE_DATA_WIDTH * TEXTURE_DATA_HEIGHT;
+
+    const char *SERVER_FILE = "/tmp/test_server";
+    const char *CLIENT_FILE = "/tmp/test_client";
+    // Custom image storage data description to transfer over socket
+    struct texture_storage_metadata_t
+    {
+        int fourcc;
+        EGLuint64KHR modifiers;
+        EGLint stride;
+        EGLint offset;
+    };
+
+
+    GLuint texture;
+    // GL: Create and populate the texture
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, TEXTURE_DATA_WIDTH, TEXTURE_DATA_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, TEXTURE_DATA_WIDTH, TEXTURE_DATA_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, texture_data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // EGL: Create EGL image from the GL texture
+    EGLImage image = eglCreateImage(_display,
+                                    _context,
+                                    EGL_GL_TEXTURE_2D,
+                                    (EGLClientBuffer)(uint64_t)texture,
+                                    NULL);
+
+    // The next line works around an issue in radeonsi driver (fixed in master at the time of writing). If you are
+    // having problems with texture rendering until the first texture update you can uncomment this line
+    // glFlush();
+
+    // EGL (extension: EGL_MESA_image_dma_buf_export): Get file descriptor (texture_dmabuf_fd) for the EGL image and get its
+    // storage data (texture_storage_metadata)
+    int texture_dmabuf_fd;
+    struct texture_storage_metadata_t texture_storage_metadata;
+
+    int num_planes;
+    PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC eglExportDMABUFImageQueryMESA =
+            (PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC)eglGetProcAddress("eglExportDMABUFImageQueryMESA");
+    EGLBoolean queried = eglExportDMABUFImageQueryMESA(_display,
+                                                       image,
+                                                       &texture_storage_metadata.fourcc,
+                                                       &num_planes,
+                                                       &texture_storage_metadata.modifiers);
+    PFNEGLEXPORTDMABUFIMAGEMESAPROC eglExportDMABUFImageMESA =
+            (PFNEGLEXPORTDMABUFIMAGEMESAPROC)eglGetProcAddress("eglExportDMABUFImageMESA");
+    EGLBoolean exported = eglExportDMABUFImageMESA(_display,
+                                                   image,
+                                                   &texture_dmabuf_fd,
+                                                   &texture_storage_metadata.stride,
+                                                   &texture_storage_metadata.offset);
+
+    // Unix Domain Socket: Send file descriptor (texture_dmabuf_fd) and texture storage data (texture_storage_metadata)
+    int sock = create_socket(SERVER_FILE);
+    while (connect_socket(sock, CLIENT_FILE) != 0)
+        ;
+    write_fd(sock, texture_dmabuf_fd, &texture_storage_metadata, sizeof(texture_storage_metadata));
+    close(sock);
+    close(texture_dmabuf_fd);
 
     return true;
 }
