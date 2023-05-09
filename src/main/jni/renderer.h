@@ -20,6 +20,9 @@
 #include <pthread.h>
 #include <EGL/egl.h> // requires ndk r5 or newer
 #include <GLES/gl.h>
+#include <GLES/glext.h>
+#include <GLES3/gl3.h>
+
 
 
 class Renderer {
@@ -37,16 +40,22 @@ public:
     int connect_socket(int sock, const char *path);
    void  write_fd(int sock, int fd, void *data, size_t data_len);
    int create_socket(const char *path);
+   int * texture_data = NULL;
+    void rotate_data();
+    const size_t TEXTURE_DATA_WIDTH = 256;
+    const size_t TEXTURE_DATA_HEIGHT = TEXTURE_DATA_WIDTH;
+    const size_t TEXTURE_DATA_SIZE = TEXTURE_DATA_WIDTH * TEXTURE_DATA_HEIGHT;
     
     
 private:
-
+    GLuint texture ;
     enum RenderThreadMessage {
         MSG_NONE = 0,
         MSG_WINDOW_SET,
         MSG_RENDER_LOOP_EXIT
     };
 
+    int* create_data(size_t size);
     pthread_t _threadId;
     pthread_mutex_t _mutex;
     enum RenderThreadMessage _msg;
@@ -66,11 +75,14 @@ private:
     bool initialize();
     void destroy();
 
-    void drawFrame();
+    void drawFrame(time_t *cur_time);
+    void gl_draw_scene();
 
     // Helper method for starting the thread 
     static void* threadStartCallback(void *myself);
 
 };
+
+
 
 #endif // RENDERER_H

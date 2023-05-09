@@ -25,6 +25,11 @@
 #include <sys/un.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
+
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#include <GLES3/gl32.h>
 
 #include "logger.h"
 #include "renderer.h"
@@ -63,12 +68,138 @@ GLubyte indices[] = {
 };
 
 
+void gl_setup_scene()
+{
+    // Shader source that draws a textures quad
+    const char *vertex_shader_source = "#version 320 es\n"
+                                       "layout (location = 0) in vec3 aPos;\n"
+                                       "layout (location = 1) in vec2 aTexCoords;\n"
+
+                                       "out vec2 TexCoords;\n"
+
+                                       "void main()\n"
+                                       "{\n"
+                                       "   TexCoords = aTexCoords;\n"
+                                       "   gl_Position = vec4(aPos.x, aPos.y, aPos.z, 1.0);\n"
+                                       "}\0";
+    const char *fragment_shader_source = "#version 320 es\n"
+                                         "precision mediump float;\n"
+                                         "out vec4 FragColor;\n"
+
+                                         "in vec2 TexCoords;\n"
+
+                                         "uniform sampler2D Texture1;\n"
+
+                                         "void main()\n"
+                                         "{\n"
+                                         "   FragColor = texture(Texture1, TexCoords);\n"
+                                         "}\0";
+
+    // vertex shader
+    int vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertex_shader, 1, &vertex_shader_source, NULL);
+    glCompileShader(vertex_shader);
+    GLint compiled;
+    glGetShaderiv(vertex_shader,GL_COMPILE_STATUS,&compiled);
+    if (!compiled) {
+        GLint infoLen = 0 ;
+        glGetShaderiv(vertex_shader,GL_INFO_LOG_LENGTH,&infoLen);
+        if (infoLen > 1){
+            char * infoLog = (char*)malloc(sizeof(char)*infoLen);
+            glGetShaderInfoLog(vertex_shader,infoLen,NULL,infoLog);
+            LOG_ERROR(" error compiled program \n %s \n",infoLog);
+            free(infoLog);
+            return ;
+        }
+    }
+    // fragment shader
+    int fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragment_shader, 1, &fragment_shader_source, NULL);
+    glCompileShader(fragment_shader);
+    glGetShaderiv(fragment_shader,GL_COMPILE_STATUS,&compiled);
+    if (!compiled) {
+        GLint infoLen = 0 ;
+        glGetShaderiv(fragment_shader,GL_INFO_LOG_LENGTH,&infoLen);
+        if (infoLen > 1){
+            char * infoLog = (char*)malloc(sizeof(char)*infoLen);
+            glGetShaderInfoLog(fragment_shader,infoLen,NULL,infoLog);
+            LOG_ERROR(" error compiled fragment program \n %s \n",infoLog);
+            free(infoLog);
+            return ;
+        }
+    }
+    // link shaders
+    int shader_program = glCreateProgram();
+    glAttachShader(shader_program, vertex_shader);
+    glAttachShader(shader_program, fragment_shader);
+    glLinkProgram(shader_program);
+    GLint linked;
+    glGetProgramiv(shader_program,GL_LINK_STATUS,&linked);
+    if (!linked) {
+        GLint infoLen = 0 ;
+        glGetProgramiv(shader_program,GL_INFO_LOG_LENGTH,&infoLen);
+        if (infoLen > 1){
+            char * infoLog = (char*)malloc(sizeof(char)*infoLen);
+            glGetProgramInfoLog(shader_program,infoLen,NULL,infoLog);
+            LOG_ERROR(" error linking program \n %s \n",infoLog);
+            free(infoLog);
+            return ;
+        }
+    }
+    // delete shaders
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
+
+
+    // quad
+    float vertices[] = {
+            0.5f, 0.5f, 0.0f, 1.0f, 0.0f,   // top right
+            0.5f, -0.5f, 0.0f, 1.0f, 1.0f,  // bottom right
+            -0.5f, -0.5f, 0.0f, 0.0f, 1.0f, // bottom left
+            -0.5f, 0.5f, 0.0f, 0.0f, 0.0f   // top left
+    };
+    unsigned int indices[] = {
+            0, 1, 3, // first Triangle
+            1, 2, 3  // second Triangle
+    };
+
+    unsigned int VBO, VAO, EBO;
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+    glGenBuffers(1, &EBO);
+    glBindVertexArray(VAO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glBindVertexArray(0);
+
+    // Prebind needed stuff for drawing
+    glUseProgram(shader_program);
+    glBindVertexArray(VAO);
+    GLenum err = glGetError();
+    if (err!= glGetError() ){
+        LOG_ERROR("setup error final happend %x",err);
+    }
+}
 
 Renderer::Renderer()
     : _msg(MSG_NONE), _display(0), _surface(0), _context(0), _angle(0)
 {
     LOG_INFO("Renderer instance created");
-    pthread_mutex_init(&_mutex, 0);    
+    texture_data    = create_data(TEXTURE_DATA_SIZE);
+    pthread_mutex_init(&_mutex, 0);
     return;
 }
 
@@ -116,7 +247,10 @@ void Renderer::setWindow(ANativeWindow *window)
 int Renderer::create_socket(const char *path)
 {
     int sock = socket(AF_UNIX, SOCK_DGRAM, 0);
-
+    if (sock < 0 ) {
+        LOG_ERROR("create socket failed");
+        return -1;
+    }
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
@@ -197,7 +331,7 @@ void Renderer::renderLoop()
     bool renderingEnabled = true;
     
     LOG_INFO("renderLoop()");
-
+    time_t last_time = time(NULL);
     while (renderingEnabled) {
 
         pthread_mutex_lock(&_mutex);
@@ -218,11 +352,20 @@ void Renderer::renderLoop()
                 break;
         }
         _msg = MSG_NONE;
-        
         if (_display) {
-            drawFrame();
+            gl_draw_scene();
+//            drawFrame( &cur_time);
             if (!eglSwapBuffers(_display, _surface)) {
                 LOG_ERROR("eglSwapBuffers() returned error %d", eglGetError());
+            }
+            time_t  cur_time =   time(NULL);
+            if (last_time < cur_time)
+            {
+                LOG_INFO("draw scene");
+                last_time = cur_time;
+                rotate_data();
+                glBindTexture(GL_TEXTURE_2D, texture);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, TEXTURE_DATA_WIDTH, TEXTURE_DATA_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, texture_data);
             }
         }
         
@@ -234,10 +377,68 @@ void Renderer::renderLoop()
     return;
 }
 
+
+
+int* Renderer::create_data(size_t size)
+{
+    size_t edge = sqrt(size);
+    size_t half_edge = edge / 2;
+
+    int* data = (int *)malloc(size * sizeof(int));
+
+    // Paint the texture like so:
+    // RG
+    // BW
+    // where R - red, G - green, B - blue, W - white
+    int red = 0x000000FF;
+    int green = 0x0000FF00;
+    int blue = 0X00FF0000;
+    int white = 0x00FFFFFF;
+    for (size_t i = 0; i < size; i++) {
+        size_t x = i % edge;
+        size_t y = i / edge;
+
+        if (x < half_edge) {
+            if (y < half_edge) {
+                data[i] = red;
+            } else {
+                data[i] = blue;
+            }
+        } else {
+            if (y < half_edge) {
+                data[i] = green;
+            } else {
+                data[i] = white;
+            }
+        }
+    }
+
+    return data;
+}
+
+void Renderer::rotate_data()
+{
+    size_t  size =  TEXTURE_DATA_SIZE;
+    int *data = texture_data;
+    size_t edge = sqrt(size);
+    size_t half_edge = edge / 2;
+
+    for (size_t i = 0; i < half_edge * half_edge; i++) {
+        size_t x = i % half_edge;
+        size_t y = i / half_edge;
+
+        int temp = data[x + y * edge];
+        data[x + y * edge] = data[(x + half_edge) + y * edge];
+        data[(x + half_edge) + y * edge] = data[(x + half_edge) + (y + half_edge) * edge];
+        data[(x + half_edge) + (y + half_edge) * edge] = data[x + (y + half_edge) * edge];
+        data[x + (y + half_edge) * edge] = temp;
+    }
+}
+
 bool Renderer::initialize()
 {
     const EGLint attribs[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_SURFACE_TYPE,EGL_WINDOW_BIT,
         EGL_BLUE_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_RED_SIZE, 8,
@@ -254,7 +455,7 @@ bool Renderer::initialize()
     GLfloat ratio;
     
     LOG_INFO("Initializing context");
-    
+//    eglBindAPI(EGL_OPENGL_API);
     if ((display = eglGetDisplay(EGL_DEFAULT_DISPLAY)) == EGL_NO_DISPLAY) {
         LOG_ERROR("eglGetDisplay() returned error %d", eglGetError());
         return false;
@@ -275,17 +476,24 @@ bool Renderer::initialize()
         destroy();
         return false;
     }
-
+    LOG_INFO("%d format \n",format);
     ANativeWindow_setBuffersGeometry(_window, 0, 0, format);
 
-    if (!(surface = eglCreateWindowSurface(display, config, _window, 0))) {
-        LOG_ERROR("eglCreateWindowSurface() returned error %d", eglGetError());
+
+    EGLint const attrib_list[] = {
+//            EGL_CONTEXT_MAJOR_VERSION,3,
+//            EGL_CONTEXT_MINOR_VERSION,2,
+            EGL_CONTEXT_CLIENT_VERSION, 3,
+            EGL_NONE};
+    context =  eglCreateContext(display, config, EGL_NO_CONTEXT, attrib_list);
+    if (context == EGL_NO_CONTEXT) {
+        LOG_ERROR("eglCreateContext() returned error %x", eglGetError());
         destroy();
         return false;
     }
-    
-    if (!(context = eglCreateContext(display, config, 0, 0))) {
-        LOG_ERROR("eglCreateContext() returned error %d", eglGetError());
+
+    if (!(surface = eglCreateWindowSurface(display, config, _window, 0))) {
+        LOG_ERROR("eglCreateWindowSurface() returned error %d", eglGetError());
         destroy();
         return false;
     }
@@ -302,31 +510,39 @@ bool Renderer::initialize()
         destroy();
         return false;
     }
-
+    LOG_INFO("%d width %d height",width,height);
     _display = display;
     _surface = surface;
     _context = context;
 
-    glDisable(GL_DITHER);
-    glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_FASTEST);
-    glClearColor(0, 0, 0, 0);
-    glEnable(GL_CULL_FACE);
-    glShadeModel(GL_SMOOTH);
-    glEnable(GL_DEPTH_TEST);
-    
-    glViewport(0, 0, width, height);
+    gl_setup_scene();
+    glGenTextures(1, &texture);
+    EGLint err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_ERROR("error happened tex bind parameteri %08X \n",err);
+        return false;
+    }
 
-    ratio = (GLfloat) width / height;
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glFrustumf(-ratio, ratio, -1, 1, 1, 10);
+//
+//    glDisable(GL_DITHER);
+//    glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_FASTEST);
+//    glClearColor(0, 0, 0, 0);
+//    glEnable(GL_CULL_FACE);
+//    glShadeModel(GL_SMOOTH);
+//    glEnable(GL_DEPTH_TEST);
+//
+//    glViewport(0, 0, width, height);
+//
+//    ratio = (GLfloat) width / height;
+//    glMatrixMode(GL_PROJECTION);
+//    glLoadIdentity();
+//    glFrustumf(-ratio, ratio, -1, 1, 1, 10);
 
-    const size_t TEXTURE_DATA_WIDTH = 256;
-    const size_t TEXTURE_DATA_HEIGHT = TEXTURE_DATA_WIDTH;
-    const size_t TEXTURE_DATA_SIZE = TEXTURE_DATA_WIDTH * TEXTURE_DATA_HEIGHT;
 
-    const char *SERVER_FILE = "/tmp/test_server";
-    const char *CLIENT_FILE = "/tmp/test_client";
+
+
+    const char *SERVER_FILE = "/data/my_socket1";
+    const char *CLIENT_FILE = "/data/test_client";
     // Custom image storage data description to transfer over socket
     struct texture_storage_metadata_t
     {
@@ -337,25 +553,63 @@ bool Renderer::initialize()
     };
 
 
-    GLuint texture;
     // GL: Create and populate the texture
-    glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, TEXTURE_DATA_WIDTH, TEXTURE_DATA_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_ERROR("error happened tex bind parameteri %08X \n",err);
+        return false;
+    }
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, TEXTURE_DATA_WIDTH, TEXTURE_DATA_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, TEXTURE_DATA_WIDTH, TEXTURE_DATA_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, texture_data);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
+    const char* version = eglQueryString(display, EGL_VERSION);
+    err = eglGetError();
+    if (err !=EGL_SUCCESS) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
+    LOG_INFO("%s", version);
 
-    // EGL: Create EGL image from the GL texture
+    PFNEGLCREATEIMAGEKHRPROC eglCreateImage;
+//    PFNGLEGLIMAGETARGETTEXTURE2DOESPROC glEGLImageTargetTexture2DOES;
+    eglCreateImage =
+            (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImage");
+    err = eglGetError();
+    if (err !=EGL_SUCCESS) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
+//    glEGLImageTargetTexture2DOES =
+//            (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+
+//    // EGL: Create EGL image from the GL texture
     EGLImage image = eglCreateImage(_display,
                                     _context,
                                     EGL_GL_TEXTURE_2D,
                                     (EGLClientBuffer)(uint64_t)texture,
                                     NULL);
+    err = eglGetError();
+    eglQueryString
+    if (err !=EGL_SUCCESS) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
 
     // The next line works around an issue in radeonsi driver (fixed in master at the time of writing). If you are
     // having problems with texture rendering until the first texture update you can uncomment this line
-    // glFlush();
+     glFlush();
 
     // EGL (extension: EGL_MESA_image_dma_buf_export): Get file descriptor (texture_dmabuf_fd) for the EGL image and get its
     // storage data (texture_storage_metadata)
@@ -370,6 +624,11 @@ bool Renderer::initialize()
                                                        &texture_storage_metadata.fourcc,
                                                        &num_planes,
                                                        &texture_storage_metadata.modifiers);
+    err = eglGetError();
+    if (err !=EGL_SUCCESS) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
     PFNEGLEXPORTDMABUFIMAGEMESAPROC eglExportDMABUFImageMESA =
             (PFNEGLEXPORTDMABUFIMAGEMESAPROC)eglGetProcAddress("eglExportDMABUFImageMESA");
     EGLBoolean exported = eglExportDMABUFImageMESA(_display,
@@ -377,13 +636,53 @@ bool Renderer::initialize()
                                                    &texture_dmabuf_fd,
                                                    &texture_storage_metadata.stride,
                                                    &texture_storage_metadata.offset);
+    err = eglGetError();
+    if (err !=EGL_SUCCESS) {
+        LOG_ERROR("error happened tex parameteri %08X \n",err);
+        return false;
+    }
+    LOG_INFO("should create socket next");
+    int client_fd;
+    struct sockaddr_un server_addr;
 
-    // Unix Domain Socket: Send file descriptor (texture_dmabuf_fd) and texture storage data (texture_storage_metadata)
-    int sock = create_socket(SERVER_FILE);
-    while (connect_socket(sock, CLIENT_FILE) != 0)
-        ;
-    write_fd(sock, texture_dmabuf_fd, &texture_storage_metadata, sizeof(texture_storage_metadata));
-    close(sock);
+    // 创建 Unix 域套接字
+    client_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (client_fd == -1) {
+        LOG_ERROR("create socket failed");
+        return -1;
+    }
+    LOG_INFO("create socket failed1");
+    // 指定 Unix 域套接字地址
+    server_addr.sun_family = AF_UNIX;
+    strncpy(server_addr.sun_path, SERVER_FILE, sizeof(server_addr.sun_path) - 1);
+    LOG_INFO("create socket failed2");
+    // 连接到服务器
+    if (connect(client_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
+        LOG_ERROR("connect failed %s",strerror(errno));
+        return -1;
+    }
+    LOG_INFO("create socket failed3");
+
+
+    // 发送数据到服务器
+//    if (write(client_fd, "Hello, server!", 14) == -1) {
+//        perror("write");
+//        exit(EXIT_FAILURE);
+//    }
+//
+//    // 关闭套接字
+//    close(client_fd);
+//
+//    // Unix Domain Socket: Send file descriptor (texture_dmabuf_fd) and texture storage data (texture_storage_metadata)
+//    int sock = create_socket(SERVER_FILE);
+//    if (sock < 0 ) {
+//        LOG_INFO("create socket failed\n");
+//        return false ;
+//    }
+//    while (connect_socket(sock, CLIENT_FILE) != 0)
+//        ;
+    write_fd(client_fd, texture_dmabuf_fd, &texture_storage_metadata, sizeof(texture_storage_metadata));
+    close(client_fd);
     close(texture_dmabuf_fd);
 
     return true;
@@ -404,25 +703,43 @@ void Renderer::destroy() {
     return;
 }
 
-void Renderer::drawFrame()
-{
+
+void Renderer::gl_draw_scene(){
+    // clear
+    glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    // draw quad
+    // VAO and shader program are already bound from the call to gl_setup_scene
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    EGLint err = glGetError();
+    if (err != GL_NO_ERROR) {
+        LOG_ERROR("error happened tex bind parameteri %08X \n",err);
+        return ;
+    }
+//
+//    glMatrixMode(GL_MODELVIEW);
+//    glLoadIdentity();
+//    glTranslatef(0, 0, -3.0f);
+//    glRotatef(_angle, 0, 1, 0);
+//    glRotatef(_angle*0.25f, 1, 0, 0);
+//
+//    glEnableClientState(GL_VERTEX_ARRAY);
+//    glEnableClientState(GL_COLOR_ARRAY);
+//
+//    glFrontFace(GL_CW);
+//    glVertexPointer(3, GL_FIXED, 0, vertices);
+//    glColorPointer(4, GL_FIXED, 0, colors);
+//    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_BYTE, indices);
+//
+//    _angle += 1.2f;
+}
 
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-    glTranslatef(0, 0, -3.0f);
-    glRotatef(_angle, 0, 1, 0);
-    glRotatef(_angle*0.25f, 1, 0, 0);
+void Renderer::drawFrame(time_t *last_time)
+{
 
-    glEnableClientState(GL_VERTEX_ARRAY);
-    glEnableClientState(GL_COLOR_ARRAY);
-    
-    glFrontFace(GL_CW);
-    glVertexPointer(3, GL_FIXED, 0, vertices);
-    glColorPointer(4, GL_FIXED, 0, colors);
-    glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_BYTE, indices);
-
-    _angle += 1.2f;    
 }
 
 void* Renderer::threadStartCallback(void *myself)
@@ -434,4 +751,6 @@ void* Renderer::threadStartCallback(void *myself)
     
     return 0;
 }
+
+
 
